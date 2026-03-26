@@ -246,6 +246,82 @@ This is the algorithm at stake when invoking
 ``metric="softdtw"``.
 
 
+.. _dtw-timestamps:
+
+Time-aware DTW (irregular sampling)
+------------------------------------
+
+Standard DTW treats observations as positionally indexed — it has no concept
+of the actual elapsed time between consecutive samples.
+When data is **irregularly sampled** (i.e. the time between observations is
+not constant), this can distort alignments.
+
+``tslearn`` provides a time-aware variant that adds a temporal penalty term
+to the local cost:
+
+.. math::
+
+    c(i, j) = \|x_i - y_j\|^2
+              + \lambda \cdot (\hat{t}_{x,i} - \hat{t}_{y,j})^2
+
+where :math:`\lambda` is the ``time_weight`` hyper-parameter and
+:math:`\hat{t}` denotes timestamps normalised to :math:`[0, 1]` within
+each series.
+Setting :math:`\lambda = 0` recovers standard DTW exactly.
+
+Usage for a single pair of series:
+
+.. code-block:: python
+
+    from tslearn.metrics import dtw_with_timestamps, dtw_path_with_timestamps
+
+    # Irregularly-sampled univariate series
+    x_values = [1., 2., 5.]
+    x_times  = [0., 1., 10.]   # large gap before the last sample
+
+    y_values = [1., 2., 5.]
+    y_times  = [0., 1., 2.]    # uniform sampling
+
+    dist = dtw_with_timestamps(x_values, y_values,
+                               x_times,  y_times,
+                               time_weight=1.0)
+
+    path, dist = dtw_path_with_timestamps(x_values, y_values,
+                                          x_times,  y_times,
+                                          time_weight=1.0)
+
+For computing a cross-similarity matrix over two datasets:
+
+.. code-block:: python
+
+    from tslearn.metrics import cdist_dtw_with_timestamps
+
+    dist_matrix = cdist_dtw_with_timestamps(
+        dataset1, timestamps1,   # shape (n_ts1, sz1, d) and (n_ts1, sz1)
+        dataset2, timestamps2,   # optional second dataset
+        time_weight=1.0,
+        n_jobs=-1,               # parallelism via joblib
+    )
+
+Timestamps are provided as a separate ``(n_ts, max_sz)`` float array
+(NaN-padded for variable-length datasets), using the helpers in
+:mod:`tslearn.utils`:
+
+.. code-block:: python
+
+    from tslearn.utils import to_timestamps_dataset
+
+    # Variable-length series: pad shorter timestamp sequences with NaN
+    timestamps = to_timestamps_dataset([
+        [0., 1., 5., 10.],
+        [0., 2., 7.],
+    ])
+
+To convert irregularly-sampled data to a uniform grid before applying
+standard algorithms, use :class:`tslearn.preprocessing.TimeSeriesResampler`
+with the ``timestamps`` argument — see :ref:`irregular-resampling`.
+
+
 .. minigallery:: tslearn.metrics.dtw tslearn.metrics.dtw_path tslearn.metrics.soft_dtw tslearn.metrics.soft_dtw_alignment tslearn.metrics.dtw_path_from_metric tslearn.metrics.dtw_limited_warping_length tslearn.barycenters.softdtw_barycenter
     :add-heading: Examples Involving DTW variants
     :heading-level: -

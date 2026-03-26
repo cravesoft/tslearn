@@ -4,7 +4,8 @@ import pytest
 
 from tslearn.preprocessing import (TimeSeriesScalerMeanVariance,
                                    TimeSeriesScalerMinMax,
-                                   TimeSeriesImputer)
+                                   TimeSeriesImputer,
+                                   TimeSeriesResampler)
 
 from tslearn.utils import to_time_series_dataset, to_time_series
 
@@ -414,3 +415,56 @@ def test_imputer():
     imputer.set_params(method="unknown")
     with pytest.raises(ValueError):
         imputer.fit_transform([[1, np.nan, 3]])
+
+
+def test_resampler_backward_compat():
+    """TimeSeriesResampler without timestamps should behave as before."""
+    X = np.array([[[0.], [3.], [6.]]])
+    out = TimeSeriesResampler(sz=5).fit_transform(X)
+    np.testing.assert_allclose(out[0, :, 0], [0., 1.5, 3., 4.5, 6.])
+
+
+def test_resampler_with_timestamps_uniform():
+    """Uniform timestamps → same result as no timestamps."""
+    X = np.array([[[0.], [3.], [6.]]])
+    T = np.array([[0., 1., 2.]])
+    out_ts = TimeSeriesResampler(sz=5).fit_transform(X, timestamps=T)
+    out_nots = TimeSeriesResampler(sz=5).fit_transform(X)
+    np.testing.assert_allclose(out_ts, out_nots)
+
+
+def test_resampler_with_timestamps_irregular():
+    """Irregular timestamps: output grid spans [t_start, t_end] uniformly."""
+    # Values at t=0, 1, 3 (gap between last two samples is 2x the first gap)
+    X = np.array([[[0.], [1.], [3.]]])
+    T = np.array([[0., 1., 3.]])
+    out = TimeSeriesResampler(sz=4).fit_transform(X, timestamps=T)
+    # Uniform grid 0..3: [0, 1, 2, 3] → interpolated values [0, 1, 2, 3]
+    np.testing.assert_allclose(out[0, :, 0], [0., 1., 2., 3.])
+
+
+def test_resampler_with_timestamps_variable_length():
+    """Variable-length dataset with timestamps."""
+    X = to_time_series_dataset([[0., 2., 6.], [0., 4.]])
+    T = np.array([[0., 1., 3.], [0., 2., np.nan]])
+    out = TimeSeriesResampler(sz=3).fit_transform(X, timestamps=T)
+    # Series 0: values [0,2,6] at t=[0,1,3]; uniform grid [0,1.5,3] → [0, 3, 6]
+    np.testing.assert_allclose(out[0, :, 0], [0., 3., 6.])
+    # Series 1: values [0,4] at t=[0,2]; uniform grid [0,1,2] → [0, 2, 4]
+    np.testing.assert_allclose(out[1, :, 0], [0., 2., 4.])
+
+
+def test_resampler_timestamps_shape_mismatch():
+    """Mismatched timestamps shape raises ValueError."""
+    X = np.array([[[0.], [1.], [2.]]])
+    T = np.array([[0., 1.]])  # too short
+    with pytest.raises(ValueError):
+        TimeSeriesResampler(sz=2).fit_transform(X, timestamps=T)
+
+
+def test_resampler_timestamps_non_monotonic():
+    """Non-monotonic timestamps raise ValueError."""
+    X = np.array([[[0.], [1.], [2.]]])
+    T = np.array([[0., 2., 1.]])
+    with pytest.raises(ValueError):
+        TimeSeriesResampler(sz=2).fit_transform(X, timestamps=T)

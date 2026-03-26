@@ -22,7 +22,10 @@ from ._dtw import(
     dtw_path,
     cdist_dtw,
     _cdist_dtw,
-    accumulated_matrix as dtw_accumulated_matrix
+    accumulated_matrix as dtw_accumulated_matrix,
+    dtw_with_timestamps,
+    dtw_path_with_timestamps,
+    cdist_dtw_with_timestamps,
 )
 from ._gak import (
     sigma_gak,
@@ -133,5 +136,8 @@ __all__ = [
     "frechet_path",
     "frechet_accumulated_matrix",
     "frechet_path_from_metric",
-    "cdist_frechet"
+    "cdist_frechet",
+    "dtw_with_timestamps",
+    "dtw_path_with_timestamps",
+    "cdist_dtw_with_timestamps",
 ]

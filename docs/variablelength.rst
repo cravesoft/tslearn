@@ -177,18 +177,75 @@ Resampling
 
 * :class:`tslearn.preprocessing.TimeSeriesResampler`
 
-Finally, if you want to use a method that cannot run on variable-length time
-series, one option would be to first resample your data so that all your
-time series have the same length and then run your method on this resampled 
-version of your dataset.
+If you want to use a method that cannot run on variable-length time series,
+one option is to first resample your data so that all series have the same
+length, then run your method on the resampled dataset.
 
-Note however that resampling will introduce temporal distortions in your 
-data. Use with great care!
+Note however that resampling will introduce temporal distortions. Use with
+care!
 
 .. code-block:: python
 
     from tslearn.preprocessing import TimeSeriesResampler
 
     resampled_X = TimeSeriesResampler(sz=X.shape[1]).fit_transform(X)
+
+
+.. _irregular-resampling:
+
+Irregularly-sampled (variable-timestep) time series
+----------------------------------------------------
+
+The features described above deal with series of **different lengths** but
+still assume **uniform** spacing between observations within each series.
+``tslearn`` also provides utilities for data where the time between
+observations is irregular.
+
+Timestamp utilities
+~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+    from tslearn.utils import to_timestamps, to_timestamps_dataset, check_timestamps_dataset
+
+    # Convert a single timestamp sequence (validates monotonicity)
+    t = to_timestamps([0., 1.5, 3., 10.])
+
+    # Pad a list of variable-length timestamp sequences to a (n_ts, max_sz) array
+    timestamps = to_timestamps_dataset([
+        [0., 1., 5., 10.],
+        [0., 2., 7.],
+    ])
+
+    # Validate a timestamp array against a dataset X
+    check_timestamps_dataset(timestamps, X)
+
+Resampling to a uniform grid
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:class:`tslearn.preprocessing.TimeSeriesResampler` accepts an optional
+``timestamps`` argument. When provided it interpolates on the **actual time
+axis** rather than on uniform integer indices, so the output grid spans
+``[t_start, t_end]`` uniformly:
+
+.. code-block:: python
+
+    import numpy as np
+    from tslearn.preprocessing import TimeSeriesResampler
+    from tslearn.utils import to_time_series_dataset, to_timestamps_dataset
+
+    # Two series sampled at irregular intervals
+    X = to_time_series_dataset([[0., 1., 3.], [0., 4.]])
+    T = to_timestamps_dataset([[0., 1., 3.], [0., 2.]])
+
+    # Resample both to 5 evenly-spaced points on their respective time ranges
+    X_resampled = TimeSeriesResampler(sz=5).fit_transform(X, timestamps=T)
+
+Time-aware DTW
+~~~~~~~~~~~~~~
+
+For computing distances directly on irregularly-sampled data without
+resampling, use :func:`tslearn.metrics.dtw_with_timestamps` and related
+functions — see :ref:`dtw-timestamps` in the DTW user guide.
 
 

@@ -89,6 +89,61 @@ def test_conversions_with_pandas():
     )
 
 
+def test_timestamps_utils():
+    """Tests for variable-timestep utility functions."""
+    # to_timestamps: basic
+    t = tslearn.utils.to_timestamps([0., 1., 2.])
+    assert_allclose(t, [0., 1., 2.])
+    assert t.dtype == float
+
+    # to_timestamps: with trailing NaN preserved
+    t = tslearn.utils.to_timestamps([0., 1., np.nan])
+    assert_allclose(t[:2], [0., 1.])
+    assert np.isnan(t[2])
+
+    # to_timestamps: remove_nans
+    t = tslearn.utils.to_timestamps([0., 1., np.nan], remove_nans=True)
+    assert len(t) == 2
+
+    # to_timestamps: non-monotonic raises
+    with pytest.raises(ValueError):
+        tslearn.utils.to_timestamps([0., 2., 1.])
+
+    # to_timestamps: constant (equal consecutive values) raises
+    with pytest.raises(ValueError):
+        tslearn.utils.to_timestamps([0., 1., 1., 2.])
+
+    # to_timestamps_dataset: variable-length
+    ds = tslearn.utils.to_timestamps_dataset([[0., 1., 2.], [0., 2.]])
+    assert ds.shape == (2, 3)
+    assert_allclose(ds[0], [0., 1., 2.])
+    assert_allclose(ds[1, :2], [0., 2.])
+    assert np.isnan(ds[1, 2])
+
+    # to_timestamps_dataset: uniform (2-D array passthrough)
+    arr = np.array([[0., 1., 2.], [0., 1., 2.]])
+    ds = tslearn.utils.to_timestamps_dataset(arr)
+    assert_allclose(ds, arr)
+
+    # to_timestamps_dataset: None passthrough
+    assert tslearn.utils.to_timestamps_dataset(None) is None
+
+    # check_timestamps_dataset: valid
+    X = np.array([[[1.], [2.], [3.]], [[4.], [5.], [np.nan]]])
+    t = np.array([[0., 1., 2.], [0., 1., np.nan]])
+    result = tslearn.utils.check_timestamps_dataset(t, X)
+    assert result.shape == (2, 3)
+
+    # check_timestamps_dataset: shape mismatch raises
+    with pytest.raises(ValueError):
+        tslearn.utils.check_timestamps_dataset(np.array([[0., 1.]]), X)
+
+    # check_timestamps_dataset: non-monotonic row raises
+    t_bad = np.array([[0., 2., 1.], [0., 1., np.nan]])
+    with pytest.raises(ValueError):
+        tslearn.utils.check_timestamps_dataset(t_bad, X)
+
+
 def test_conversions_cesium():
     pytest.importorskip('cesium')
     n, sz, d = 15, 10, 3

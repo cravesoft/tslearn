@@ -3,10 +3,12 @@
 from numba import njit
 
 import numpy
+from joblib import Parallel, delayed
 
 from tslearn.backend import instantiate_backend
 from tslearn.backend.pytorch_backend import HAS_TORCH
 from tslearn.utils import to_time_series, to_time_series_dataset
+from tslearn.utils.utils import _ts_size
 
 from ._masks import (
     GLOBAL_CONSTRAINT_CODE,
@@ -573,3 +575,340 @@ def _cdist_dtw(
         sakoe_chiba_radius=sakoe_chiba_radius,
         itakura_max_slope=itakura_max_slope,
     )
+
+
+# ---------------------------------------------------------------------------
+# Time-aware DTW: handles irregular sampling via explicit timestamps
+# ---------------------------------------------------------------------------
+
+def __make_accumulated_matrix_with_timestamps(backend):
+    """Factory producing an accumulated-cost-matrix function that penalises
+    temporal misalignment in addition to value distance."""
+
+    def _amwt(s1, s2, mask, t1, t2, time_weight):
+        l1 = s1.shape[0]
+        l2 = s2.shape[0]
+        cum_sum = backend.full((l1 + 1, l2 + 1), backend.inf)
+        cum_sum[0, 0] = 0.0
+        for i in range(l1):
+            for j in range(l2):
+                if mask[i, j]:
+                    dist = 0.0
+                    for di in range(s1[i].shape[0]):
+                        diff = s1[i][di] - s2[j][di]
+                        dist += diff * diff
+                    dt = t1[i] - t2[j]
+                    dist += time_weight * dt * dt
+                    cum_sum[i + 1, j + 1] = dist
+                    cum_sum[i + 1, j + 1] += min(
+                        cum_sum[i, j + 1],
+                        cum_sum[i + 1, j],
+                        cum_sum[i, j],
+                    )
+        return cum_sum[1:, 1:]
+
+    if backend is numpy:
+        return njit(nogil=True)(_amwt)
+    else:
+        return _amwt
+
+
+_njit_accumulated_matrix_with_timestamps = (
+    __make_accumulated_matrix_with_timestamps(numpy)
+)
+if HAS_TORCH:
+    _accumulated_matrix_with_timestamps = (
+        __make_accumulated_matrix_with_timestamps(instantiate_backend("torch"))
+    )
+else:
+    _accumulated_matrix_with_timestamps = _njit_accumulated_matrix_with_timestamps
+
+
+def _normalize_timestamps(t):
+    """Normalize a 1-D timestamp array to [0, 1].
+
+    If all values are identical the array is mapped to all-zeros.
+    """
+    t = numpy.asarray(t, dtype=float)
+    t_min, t_max = t[0], t[-1]
+    if t_max == t_min:
+        return numpy.zeros_like(t)
+    return (t - t_min) / (t_max - t_min)
+
+
+def dtw_with_timestamps(
+    s1,
+    s2,
+    t1,
+    t2,
+    time_weight=1.0,
+    global_constraint=None,
+    sakoe_chiba_radius=None,
+    itakura_max_slope=None,
+):
+    r"""Compute time-aware Dynamic Time Warping (DTW) between two time series.
+
+    Extends DTW with a penalty term based on the actual timestamps of
+    observations, making it aware of irregular sampling.  The local cost
+    between observations *i* and *j* is:
+
+    .. math::
+
+        c(i, j) = \|X_i - Y_j\|^2
+                  + \lambda \cdot (\hat{t}_{1,i} - \hat{t}_{2,j})^2
+
+    where :math:`\lambda` is ``time_weight`` and :math:`\hat{t}` denotes
+    timestamps normalised to [0, 1] within each series.
+
+    Parameters
+    ----------
+    s1 : array-like, shape=(sz1, d) or (sz1,)
+        First time series.
+    s2 : array-like, shape=(sz2, d) or (sz2,)
+        Second time series.
+    t1 : array-like, shape=(sz1,)
+        Timestamps for s1. Must be strictly monotonically increasing.
+    t2 : array-like, shape=(sz2,)
+        Timestamps for s2. Must be strictly monotonically increasing.
+    time_weight : float (default: 1.0)
+        Weight :math:`\lambda` on the temporal penalty. Set to ``0.`` to
+        recover standard DTW behaviour.
+    global_constraint : {"itakura", "sakoe_chiba"} or None (default: None)
+        Global constraint to restrict admissible paths.
+    sakoe_chiba_radius : int or None (default: None)
+        Radius for Sakoe-Chiba band constraint.
+    itakura_max_slope : float or None (default: None)
+        Maximum slope for Itakura parallelogram constraint.
+
+    Returns
+    -------
+    float
+        Time-aware DTW similarity score.
+
+    Examples
+    --------
+    >>> dtw_with_timestamps([1, 2, 3], [1., 2., 3.], [0., 1., 2.], [0., 1., 2.])
+    0.0
+    >>> # time_weight=0 recovers standard DTW
+    >>> dtw_with_timestamps([1, 2, 3], [1., 2., 2., 3.],
+    ...                     [0., 1., 2.], [0., 1., 2., 3.], time_weight=0.)
+    0.0
+
+    See Also
+    --------
+    dtw : Standard DTW without timestamp awareness
+    dtw_path_with_timestamps : Get both the path and the score
+    cdist_dtw_with_timestamps : Cross-similarity matrix for datasets
+    """
+    s1 = to_time_series(s1, remove_nans=True)
+    s2 = to_time_series(s2, remove_nans=True)
+
+    if s1.shape[0] == 0 or s2.shape[0] == 0:
+        raise ValueError(
+            "One of the input time series contains only nans or has zero length."
+        )
+    if s1.shape[1] != s2.shape[1]:
+        raise ValueError("All input time series must have the same feature size.")
+
+    t1 = _normalize_timestamps(numpy.asarray(t1, dtype=float).ravel()[: s1.shape[0]])
+    t2 = _normalize_timestamps(numpy.asarray(t2, dtype=float).ravel()[: s2.shape[0]])
+
+    if len(t1) != s1.shape[0]:
+        raise ValueError("t1 length must match s1 length.")
+    if len(t2) != s2.shape[0]:
+        raise ValueError("t2 length must match s2 length.")
+
+    gc = GLOBAL_CONSTRAINT_CODE[global_constraint]
+    mask = _njit_compute_mask(s1.shape[0], s2.shape[0], gc, sakoe_chiba_radius, itakura_max_slope)
+    cum_sum = _njit_accumulated_matrix_with_timestamps(
+        s1, s2, mask, t1, t2, float(time_weight)
+    )
+    return float(numpy.sqrt(cum_sum[-1, -1]))
+
+
+def dtw_path_with_timestamps(
+    s1,
+    s2,
+    t1,
+    t2,
+    time_weight=1.0,
+    global_constraint=None,
+    sakoe_chiba_radius=None,
+    itakura_max_slope=None,
+):
+    r"""Compute time-aware DTW and return both the optimal path and score.
+
+    See :func:`dtw_with_timestamps` for the full description of the
+    time-aware cost formulation.
+
+    Parameters
+    ----------
+    s1 : array-like, shape=(sz1, d) or (sz1,)
+        First time series.
+    s2 : array-like, shape=(sz2, d) or (sz2,)
+        Second time series.
+    t1 : array-like, shape=(sz1,)
+        Timestamps for s1. Must be strictly monotonically increasing.
+    t2 : array-like, shape=(sz2,)
+        Timestamps for s2. Must be strictly monotonically increasing.
+    time_weight : float (default: 1.0)
+        Weight on the temporal penalty.
+    global_constraint : {"itakura", "sakoe_chiba"} or None (default: None)
+        Global constraint to restrict admissible paths.
+    sakoe_chiba_radius : int or None (default: None)
+        Radius for Sakoe-Chiba band constraint.
+    itakura_max_slope : float or None (default: None)
+        Maximum slope for Itakura parallelogram constraint.
+
+    Returns
+    -------
+    list of integer pairs
+        Optimal alignment path as (i, j) index pairs.
+    float
+        Time-aware DTW similarity score.
+
+    Examples
+    --------
+    >>> path, dist = dtw_path_with_timestamps(
+    ...     [1, 2, 3], [1., 2., 3.], [0., 1., 2.], [0., 1., 2.]
+    ... )
+    >>> path
+    [(0, 0), (1, 1), (2, 2)]
+    >>> float(dist)
+    0.0
+
+    See Also
+    --------
+    dtw_path : Standard DTW path without timestamp awareness
+    dtw_with_timestamps : Get only the similarity score
+    """
+    s1 = to_time_series(s1, remove_nans=True)
+    s2 = to_time_series(s2, remove_nans=True)
+
+    if s1.shape[0] == 0 or s2.shape[0] == 0:
+        raise ValueError(
+            "One of the input time series contains only nans or has zero length."
+        )
+    if s1.shape[1] != s2.shape[1]:
+        raise ValueError("All input time series must have the same feature size.")
+
+    t1 = _normalize_timestamps(numpy.asarray(t1, dtype=float).ravel()[: s1.shape[0]])
+    t2 = _normalize_timestamps(numpy.asarray(t2, dtype=float).ravel()[: s2.shape[0]])
+
+    if len(t1) != s1.shape[0]:
+        raise ValueError("t1 length must match s1 length.")
+    if len(t2) != s2.shape[0]:
+        raise ValueError("t2 length must match s2 length.")
+
+    gc = GLOBAL_CONSTRAINT_CODE[global_constraint]
+    mask = _njit_compute_mask(s1.shape[0], s2.shape[0], gc, sakoe_chiba_radius, itakura_max_slope)
+    cum_sum = _njit_accumulated_matrix_with_timestamps(
+        s1, s2, mask, t1, t2, float(time_weight)
+    )
+    path = _njit_compute_path(cum_sum)
+    return path, float(numpy.sqrt(cum_sum[-1, -1]))
+
+
+def cdist_dtw_with_timestamps(
+    dataset1,
+    timestamps1,
+    dataset2=None,
+    timestamps2=None,
+    time_weight=1.0,
+    global_constraint=None,
+    sakoe_chiba_radius=None,
+    itakura_max_slope=None,
+    n_jobs=None,
+    verbose=0,
+):
+    r"""Compute cross-similarity matrix using time-aware DTW.
+
+    Parameters
+    ----------
+    dataset1 : array-like, shape=(n_ts1, sz1, d)
+        First dataset of time series.
+    timestamps1 : array-like, shape=(n_ts1, sz1)
+        Timestamps for dataset1. Each row must be strictly monotonically
+        increasing (NaN-padded for variable-length series).
+    dataset2 : array-like or None, shape=(n_ts2, sz2, d) (default: None)
+        Second dataset. If None, self-similarity of dataset1 is returned.
+    timestamps2 : array-like or None, shape=(n_ts2, sz2) (default: None)
+        Timestamps for dataset2.
+    time_weight : float (default: 1.0)
+        Weight on the temporal penalty term.
+    global_constraint : {"itakura", "sakoe_chiba"} or None (default: None)
+        Global constraint to restrict admissible paths.
+    sakoe_chiba_radius : int or None (default: None)
+        Radius for Sakoe-Chiba band constraint.
+    itakura_max_slope : float or None (default: None)
+        Maximum slope for Itakura parallelogram constraint.
+    n_jobs : int or None (default: None)
+        Number of parallel jobs (passed to :class:`joblib.Parallel`).
+    verbose : int (default: 0)
+        Verbosity level.
+
+    Returns
+    -------
+    numpy.ndarray, shape=(n_ts1, n_ts2)
+        Cross-similarity matrix.
+
+    Examples
+    --------
+    >>> X = [[1, 2, 3], [1., 2., 4.]]
+    >>> T = [[0., 1., 2.], [0., 1., 2.]]
+    >>> cdist_dtw_with_timestamps(X, T)
+    array([[0., 1.],
+           [1., 0.]])
+
+    See Also
+    --------
+    cdist_dtw : Standard DTW cross-similarity without timestamp awareness
+    dtw_with_timestamps : Single-pair time-aware DTW
+    """
+    from tslearn.utils import check_timestamps_dataset, to_timestamps_dataset
+
+    dataset1 = to_time_series_dataset(dataset1)
+    ts1_arr = to_timestamps_dataset(timestamps1, max_sz=dataset1.shape[1])
+    timestamps1_ = check_timestamps_dataset(ts1_arr, dataset1)
+
+    self_similarity = dataset2 is None
+    if self_similarity:
+        dataset2 = dataset1
+        timestamps2_ = timestamps1_
+    else:
+        dataset2 = to_time_series_dataset(dataset2)
+        ts2_arr = to_timestamps_dataset(timestamps2, max_sz=dataset2.shape[1])
+        timestamps2_ = check_timestamps_dataset(ts2_arr, dataset2)
+
+    n_ts1 = dataset1.shape[0]
+    n_ts2 = dataset2.shape[0]
+    gc = GLOBAL_CONSTRAINT_CODE[global_constraint]
+
+    def _pair(i, j):
+        sz_i = _ts_size(dataset1[i])
+        sz_j = _ts_size(dataset2[j])
+        s1_ = dataset1[i, :sz_i]
+        s2_ = dataset2[j, :sz_j]
+        t1_ = _normalize_timestamps(timestamps1_[i, :sz_i])
+        t2_ = _normalize_timestamps(timestamps2_[j, :sz_j])
+        mask = _njit_compute_mask(sz_i, sz_j, gc, sakoe_chiba_radius, itakura_max_slope)
+        cum_sum = _njit_accumulated_matrix_with_timestamps(
+            s1_, s2_, mask, t1_, t2_, float(time_weight)
+        )
+        return float(numpy.sqrt(cum_sum[-1, -1]))
+
+    if self_similarity:
+        indices = [(i, j) for i in range(n_ts1) for j in range(i, n_ts1)]
+    else:
+        indices = [(i, j) for i in range(n_ts1) for j in range(n_ts2)]
+
+    results = Parallel(n_jobs=n_jobs, verbose=verbose)(
+        delayed(_pair)(i, j) for i, j in indices
+    )
+
+    cdist = numpy.zeros((n_ts1, n_ts2))
+    for (i, j), dist in zip(indices, results):
+        cdist[i, j] = dist
+        if self_similarity and i != j:
+            cdist[j, i] = dist
+    return cdist

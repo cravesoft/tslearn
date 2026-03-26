@@ -518,6 +518,164 @@ def _ts_size(ts, backend=None):
     return sz
 
 
+def to_timestamps(ts_timestamps, remove_nans=False):
+    """Transforms a timestamp sequence into the format used in tslearn.
+
+    Parameters
+    ----------
+    ts_timestamps : array-like, shape=(sz,)
+        Timestamps for a single time series. Must be strictly monotonically
+        increasing (ignoring trailing NaNs).
+    remove_nans : bool (default: False)
+        Whether trailing NaN values should be removed.
+
+    Returns
+    -------
+    numpy.ndarray, shape=(sz,)
+        Float64 1-D timestamp array.
+
+    Raises
+    ------
+    ValueError
+        If the non-NaN timestamps are not strictly monotonically increasing.
+
+    Examples
+    --------
+    >>> to_timestamps([0., 1., 2.])
+    array([0., 1., 2.])
+    >>> to_timestamps([0., 1., numpy.nan])
+    array([ 0.,  1., nan])
+    >>> to_timestamps([0., 1., numpy.nan], remove_nans=True)
+    array([0., 1.])
+
+    See Also
+    --------
+    to_timestamps_dataset : Transforms a dataset of timestamp sequences
+    """
+    ts = numpy.array(ts_timestamps, dtype=float).ravel()
+    valid = ts[~numpy.isnan(ts)]
+    if len(valid) > 1 and not numpy.all(numpy.diff(valid) > 0):
+        raise ValueError(
+            "Timestamps must be strictly monotonically increasing. "
+            "Got: {}".format(valid)
+        )
+    if remove_nans:
+        sz = len(ts)
+        while sz > 0 and numpy.isnan(ts[sz - 1]):
+            sz -= 1
+        ts = ts[:sz]
+    return ts
+
+
+def to_timestamps_dataset(timestamps_list, max_sz=None):
+    """Transforms a list of timestamp sequences into a padded dataset.
+
+    Shorter sequences are padded with NaN to match the longest one (or
+    ``max_sz`` if provided), mirroring the behaviour of
+    :func:`to_time_series_dataset`.
+
+    Parameters
+    ----------
+    timestamps_list : list of array-like or array-like, shape=(n_ts, sz) or None
+        List of 1-D timestamp arrays of possibly varying lengths.
+        If already a 2-D uniform array, it is returned as-is (after dtype
+        conversion). If None, returns None.
+    max_sz : int or None (default: None)
+        Pad all sequences to this length. If None, uses the length of the
+        longest sequence.
+
+    Returns
+    -------
+    numpy.ndarray, shape=(n_ts, max_sz) or None
+        NaN-padded timestamp dataset, or None if input is None.
+
+    Examples
+    --------
+    >>> to_timestamps_dataset([[0., 1., 2.], [0., 2.]])
+    array([[ 0.,  1.,  2.],
+           [ 0.,  2., nan]])
+    >>> to_timestamps_dataset(None) is None
+    True
+
+    See Also
+    --------
+    to_timestamps : Transforms a single timestamp sequence
+    """
+    if timestamps_list is None:
+        return None
+    # Fast path: already a uniform 2-D array
+    try:
+        arr = numpy.array(timestamps_list, dtype=float)
+        if arr.ndim == 2:
+            return arr
+    except (ValueError, TypeError):
+        pass
+    # Variable-length path
+    n = len(timestamps_list)
+    if n == 0:
+        return numpy.zeros((0, 0))
+    converted = [to_timestamps(t) for t in timestamps_list]
+    m = max_sz if max_sz is not None else max(len(t) for t in converted)
+    out = numpy.full((n, m), numpy.nan)
+    for i, t in enumerate(converted):
+        out[i, : len(t)] = t
+    return out
+
+
+def check_timestamps_dataset(timestamps, X):
+    """Validate a timestamp dataset against a time series dataset X.
+
+    Checks that ``timestamps`` has shape ``(n_ts, max_sz)`` matching ``X``,
+    that its NaN positions are consistent with ``X``, and that each row is
+    strictly monotonically increasing (ignoring trailing NaNs).
+
+    Parameters
+    ----------
+    timestamps : array-like, shape=(n_ts, max_sz)
+        Timestamp dataset to validate.
+    X : array-like, shape=(n_ts, max_sz, d)
+        Time series dataset to match against.
+
+    Returns
+    -------
+    numpy.ndarray, shape=(n_ts, max_sz)
+        Validated timestamps array.
+
+    Raises
+    ------
+    ValueError
+        If the shape does not match or timestamps are not monotonically
+        increasing.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> X = numpy.array([[[1.], [2.], [3.]], [[4.], [5.], [numpy.nan]]])
+    >>> t = numpy.array([[0., 1., 2.], [0., 1., numpy.nan]])
+    >>> result = check_timestamps_dataset(t, X)
+    >>> result.shape
+    (2, 3)
+    """
+    timestamps = numpy.array(timestamps, dtype=float)
+    if timestamps.ndim == 1:
+        timestamps = timestamps.reshape(1, -1)
+    n_ts, max_sz, d = X.shape
+    if timestamps.shape != (n_ts, max_sz):
+        raise ValueError(
+            "timestamps shape {} does not match X shape {}. "
+            "Expected ({}, {}).".format(timestamps.shape, X.shape, n_ts, max_sz)
+        )
+    for i in range(n_ts):
+        t_i = timestamps[i]
+        valid = t_i[~numpy.isnan(t_i)]
+        if len(valid) > 1 and not numpy.all(numpy.diff(valid) > 0):
+            raise ValueError(
+                "Timestamps for series {} are not strictly monotonically "
+                "increasing.".format(i)
+            )
+    return timestamps
+
+
 def ts_zeros(sz, d=1):
     """Returns a time series made of zero values.
 

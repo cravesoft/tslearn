@@ -13,7 +13,9 @@ from tslearn.utils import (
     to_time_series_dataset,
     to_time_series,
     check_array,
-    check_dims
+    check_dims,
+    check_timestamps_dataset,
+    to_timestamps_dataset,
 )
 from tslearn.utils.utils import _check_equal_size, _ts_size
 
@@ -71,33 +73,56 @@ class TimeSeriesResampler(TimeSeriesMixin, TransformerMixin, BaseEstimator):
             X_out[i] = numpy.nanmean(X[i], axis=0, keepdims=True)
         return X_out
 
-    def fit_transform(self, X, y=None, **kwargs):
+    def fit_transform(self, X, y=None, timestamps=None, **kwargs):
         """Fit to data, then transform it.
 
         Parameters
         ----------
         X : array-like of shape (n_ts, sz, d)
             Time series dataset to be resampled.
+        timestamps : array-like of shape (n_ts, sz) or None (default: None)
+            Timestamps for each observation in X. If provided, resampling uses
+            actual time coordinates rather than uniform integer indices.
+            Each row must be strictly monotonically increasing.
 
         Returns
         -------
         numpy.ndarray
             Resampled time series dataset.
         """
-        return self.fit(X).transform(X)
+        return self.fit(X).transform(X, timestamps=timestamps)
 
-    def transform(self, X, y=None, **kwargs):
-        """Fit to data, then transform it.
+    def transform(self, X, y=None, timestamps=None, **kwargs):
+        """Resample time series to the target size.
 
         Parameters
         ----------
         X : array-like of shape (n_ts, sz, d)
             Time series dataset to be resampled.
+        timestamps : array-like of shape (n_ts, sz) or None (default: None)
+            Timestamps for each observation in X. If provided, resampling
+            interpolates on the actual time axis so that irregularly sampled
+            series are handled correctly. The output grid spans
+            ``[t_start, t_end]`` of each series uniformly.
+            Each row must be strictly monotonically increasing.
+            If None (default), uniform integer indices are assumed and
+            behaviour is identical to previous versions.
 
         Returns
         -------
         numpy.ndarray
             Resampled time series dataset.
+
+        Examples
+        --------
+        >>> import numpy
+        >>> X = numpy.array([[[0.], [1.], [3.]]])
+        >>> t = numpy.array([[0., 1., 3.]])
+        >>> TimeSeriesResampler(sz=4).fit_transform(X, timestamps=t)
+        array([[[0.        ],
+                [1.        ],
+                [2.        ],
+                [3.        ]]])
         """
         check_is_fitted(self, '_X_fit_dims')
 
@@ -113,18 +138,30 @@ class TimeSeriesResampler(TimeSeriesMixin, TransformerMixin, BaseEstimator):
         if target_sz == 1:
             return self._transform_unit_sz(X_)
 
-        n_ts, sz, d = X_.shape
+        # Validate timestamps if provided
+        timestamps_ = None
+        if timestamps is not None:
+            ts_arr = to_timestamps_dataset(timestamps, max_sz=X_.shape[1])
+            timestamps_ = check_timestamps_dataset(ts_arr, X_)
+
+        n_ts, max_sz, d = X_.shape
         equal_size = _check_equal_size(X_)
         X_out = numpy.empty((n_ts, target_sz, d))
-        for i in range(X_.shape[0]):
-            if not equal_size:
-                sz = _ts_size(X_[i])
+        for i in range(n_ts):
+            sz_i = max_sz
+            if not equal_size or timestamps_ is not None:
+                sz_i = _ts_size(X_[i])
+
+            if timestamps_ is not None:
+                t_i = timestamps_[i, :sz_i]
+                src_x = t_i
+                dst_x = numpy.linspace(t_i[0], t_i[-1], target_sz)
+            else:
+                src_x = numpy.linspace(0, 1, sz_i)
+                dst_x = numpy.linspace(0, 1, target_sz)
+
             for di in range(d):
-                X_out[i, :, di] = numpy.interp(
-                    numpy.linspace(0, 1, target_sz),
-                    numpy.linspace(0, 1, sz),
-                    X_[i, :sz, di]
-                    )
+                X_out[i, :, di] = numpy.interp(dst_x, src_x, X_[i, :sz_i, di])
         return X_out
 
     def _more_tags(self):

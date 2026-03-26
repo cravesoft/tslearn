@@ -1111,3 +1111,90 @@ def test_sax():
         dataset2=[[-1, 0, 1], [1, 0, 1]],
     )
     np.testing.assert_equal(dists, expected)
+
+
+def test_dtw_with_timestamps_identical():
+    """Identical series with identical timestamps → distance is 0."""
+    s = [1., 2., 3.]
+    t = [0., 1., 2.]
+    d = tslearn.metrics.dtw_with_timestamps(s, s, t, t)
+    np.testing.assert_allclose(d, 0.)
+
+
+def test_dtw_with_timestamps_time_weight_zero():
+    """time_weight=0 recovers standard DTW."""
+    s1 = [1., 2., 3.]
+    s2 = [1., 2., 2., 3.]
+    t1 = [0., 1., 2.]
+    t2 = [0., 1., 2., 3.]
+    d = tslearn.metrics.dtw_with_timestamps(s1, s2, t1, t2, time_weight=0.)
+    np.testing.assert_allclose(d, 0.)
+
+
+def test_dtw_with_timestamps_temporal_penalty():
+    """Same values but different timestamps incur a positive penalty."""
+    s = [1., 2., 3.]
+    t_near = [0., 1., 2.]
+    t_far  = [0., 1., 100.]
+    d_near = tslearn.metrics.dtw_with_timestamps(s, s, t_near, t_far, time_weight=0.)
+    d_far  = tslearn.metrics.dtw_with_timestamps(s, s, t_near, t_far, time_weight=1.)
+    # With time_weight=0 values are identical → 0; with time_weight=1 the last
+    # timestamp is far away → positive distance
+    np.testing.assert_allclose(d_near, 0.)
+    assert d_far > 0.
+
+
+def test_dtw_path_with_timestamps():
+    """dtw_path_with_timestamps returns correct path and score."""
+    path, dist = tslearn.metrics.dtw_path_with_timestamps(
+        [1., 2., 3.], [1., 2., 3.], [0., 1., 2.], [0., 1., 2.]
+    )
+    assert path == [(0, 0), (1, 1), (2, 2)]
+    np.testing.assert_allclose(dist, 0.)
+
+
+def test_dtw_path_with_timestamps_variable_length():
+    """Works with series of different lengths."""
+    path, dist = tslearn.metrics.dtw_path_with_timestamps(
+        [1., 2., 3.], [1., 2., 2., 3.],
+        [0., 1., 2.],  [0., 1., 2., 3.],
+        time_weight=0.
+    )
+    np.testing.assert_allclose(dist, 0.)
+
+
+def test_cdist_dtw_with_timestamps():
+    """Cross-distance matrix is symmetric and zero on the diagonal."""
+    X = [[1., 2., 3.], [1., 2., 4.]]
+    T = [[0., 1., 2.], [0., 1., 2.]]
+    cdist = tslearn.metrics.cdist_dtw_with_timestamps(X, T)
+    assert cdist.shape == (2, 2)
+    np.testing.assert_allclose(cdist[0, 0], 0.)
+    np.testing.assert_allclose(cdist[1, 1], 0.)
+    np.testing.assert_allclose(cdist[0, 1], cdist[1, 0])
+    assert cdist[0, 1] > 0.
+
+
+def test_cdist_dtw_with_timestamps_two_datasets():
+    """Cross-distance with explicit dataset2."""
+    X1 = [[1., 2., 3.]]
+    T1 = [[0., 1., 2.]]
+    X2 = [[1., 2., 3.], [1., 2., 4.]]
+    T2 = [[0., 1., 2.], [0., 1., 2.]]
+    cdist = tslearn.metrics.cdist_dtw_with_timestamps(X1, T1, X2, T2)
+    assert cdist.shape == (1, 2)
+    np.testing.assert_allclose(cdist[0, 0], 0.)
+    assert cdist[0, 1] > 0.
+
+
+def test_dtw_with_timestamps_invalid_inputs():
+    """Validation errors are raised for bad inputs."""
+    with pytest.raises(ValueError):
+        # Mismatched number of features
+        tslearn.metrics.dtw_with_timestamps(
+            [[1., 2.], [3., 4.]], [[1.], [2.]],
+            [0., 1.], [0., 1.]
+        )
+    with pytest.raises(ValueError):
+        # Empty series
+        tslearn.metrics.dtw_with_timestamps([], [1., 2.], [], [0., 1.])
